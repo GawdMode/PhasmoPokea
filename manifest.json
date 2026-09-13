@@ -1,0 +1,23 @@
+{
+  "id": "lavender_spirit_wardens",
+  "name": "PhasmoPokéa",
+  "version": "1.0.0",
+  "api": 2,
+  "entry": "main.lua",
+  "profile": "content",
+  "category": "QUEST",
+  "games": [
+    "gen2"
+  ],
+  "game_version": ">=0.2.45 <2.0.0",
+  "priority": 100,
+  "permissions": [
+    "engine_internals"
+  ],
+  "dependencies": [],
+  "optional_dependencies": [
+    "pokesurvive"
+  ],
+  "conflicts": [],
+  "description": "Become a Spirit Warden and investigate haunted locations in Pokémon Crystal."
+}
