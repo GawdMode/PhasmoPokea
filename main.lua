@@ -1,4 +1,4 @@
--- PhasmoPokea - 1.0.0
+-- PhasmoPokea - 1.1.0
 -- Baseline vertical-slice foundation:
 --   * Adds a Spirit Warden NPC beside Mr. Fuji in SOUL_HOUSE.
 --   * First conversation offers enrollment with YES/NO.
@@ -678,9 +678,12 @@ return function(mod)
   end
 
   local function hauntedNow()
-    local ow = mod.world:overworld()
-    return mod.save:get("warden_enrolled") == true
-      and ow and ow.map and isHauntedMapId(ow.map.id)
+    -- Most hooks call this outside active investigations too. Bail out before
+    -- touching the world facade unless this save has actually enrolled.
+    if mod.save:get("warden_enrolled") ~= true then return false end
+    if not (mod.world and mod.world.overworld) then return false end
+    local ok, ow = pcall(mod.world.overworld, mod.world)
+    return ok and ow and ow.map and isHauntedMapId(ow.map.id) or false
   end
 
   local function activity() return tonumber(mod.save:get("haunt_activity")) or 0 end
@@ -1815,7 +1818,10 @@ return function(mod)
     return mod.save:get("spirit_band_unlocked") == true
   end
 
-  local EZRA_PHONE_ID = 8 -- one of Crystal's unused PHONE_* slots
+  -- PokeSurvive uses the first const-skip phone slot for IMPOSTER OAK.  Ezra
+  -- therefore owns the next unused slot so both contacts can coexist in the
+  -- same ten-entry Pokegear list.
+  local EZRA_PHONE_ID = 9
 
   -- Give Ezra a real slot in the native Pokegear contact list without replacing
   -- any retail trainer number. Slot 8 is one of the cart's const_skip holes.
@@ -1830,6 +1836,27 @@ return function(mod)
     caller = "UnusedPhoneScript",
   }
 
+  -- Gen2's merged phone registry is applied after mod entry chunks finish.
+  -- PokeSurvive also supplies custom phone data, so that late merge can turn
+  -- an otherwise valid const-skip row back into its fallback name, UNKNOWN.
+  -- Resolve Ezra at the final name lookup instead of trusting load order.
+  if not Phone._wardenEzraNamePatched then
+    Phone._wardenEzraNamePatched=true
+    local vanillaContactName=Phone.contactName
+    Phone.contactName=function(id,trainerData)
+      if tonumber(id)==EZRA_PHONE_ID then return "EZRA",nil end
+      return vanillaContactName(id,trainerData)
+    end
+  end
+
+  -- Reserve Ezra like Crystal reserves Mom and Elm. This keeps an enrollment
+  -- slot available instead of allowing optional trainer numbers to consume
+  -- every usable position before the player joins the Wardens.
+  if not Phone._wardenEzraPermanent then
+    Phone._wardenEzraPermanent=true
+    Phone.PERMANENT_NUMBERS[#Phone.PERMANENT_NUMBERS+1]=EZRA_PHONE_ID
+  end
+
   if not Phone._wardenEzraDeletePatched then
     Phone._wardenEzraDeletePatched = true
     local vanillaCanDelete = Phone.canDelete
@@ -1839,17 +1866,65 @@ return function(mod)
     end
   end
 
-  local function addEzraPhoneContact(ow)
-    local save = ow and ow.game and ow.game.save
+  local function addEzraPhoneContactToSave(save)
     if not save then return false end
     if Phone.hasContact(save, EZRA_PHONE_ID) then
       mod.save:set("ezra_phone_added", true)
+      mod.save:set("ezra_phone_contact_id",EZRA_PHONE_ID)
       return true
     end
     local ok = Phone.addContact(save, EZRA_PHONE_ID)
-    if ok then mod.save:set("ezra_phone_added", true) end
+    if ok then
+      mod.save:set("ezra_phone_added", true)
+      mod.save:set("ezra_phone_contact_id",EZRA_PHONE_ID)
+    end
     return ok and true or false
   end
+
+  local function addEzraPhoneContact(ow)
+    return addEzraPhoneContactToSave(ow and ow.game and ow.game.save)
+  end
+
+  -- New-game initialization can rebuild Crystal's phone state after Ezra's
+  -- enrollment callback has run. Verify the real saved list again at the
+  -- presentation seam so an enlisted player's Pokegear always displays him.
+  if not Pokegear._wardenEzraPhoneListPatched then
+    Pokegear._wardenEzraPhoneListPatched=true
+    Pokegear._wardenVanillaPhoneList=Pokegear.phoneList
+    Pokegear.phoneList=function(self)
+      if mod.save:get("warden_enrolled")==true and self.save
+        and not Phone.hasContact(self.save,EZRA_PHONE_ID) then
+        addEzraPhoneContactToSave(self.save)
+      end
+      return Pokegear._wardenVanillaPhoneList(self)
+    end
+  end
+
+  -- Use the engine's supported phone-list seam as the authoritative repair.
+  -- Besides surviving UI class patches from companion mods, this updates the
+  -- actual saved wPhoneList and then guarantees that the same call displays
+  -- Ezra immediately (Phone.contacts builds its output before hooks run).
+  mod.hooks:wrap("phone.contact_list",function(next,save,list)
+    local out=next(save,list)
+    if type(out)~="table" then out=list end
+    if mod.save:get("warden_enrolled")==true and save then
+      addEzraPhoneContactToSave(save)
+      local found=false
+      for slot=1,Phone.CONTACT_LIST_SIZE do
+        if tonumber(out[slot])==EZRA_PHONE_ID then found=true break end
+      end
+      if not found then
+        local state=Phone.state(save)
+        for slot=1,Phone.CONTACT_LIST_SIZE do
+          if tonumber(state.list[slot])==EZRA_PHONE_ID then
+            out[slot]=EZRA_PHONE_ID
+            break
+          end
+        end
+      end
+    end
+    return out
+  end,1000)
 
   local function pendingCase()
     return mod.save:get("warden_case_pending") == true
@@ -3181,33 +3256,72 @@ return function(mod)
       end
       local world=self.game and self.game.world
       if world then world:playSfxNamed("Sfx_Call",106) end
+      self.call={contact=id,kind="warden_ezra",name="EZRA",
+        text="EZRA: "..self:phoneText("PhoneEllipse")}
       local text
       if world and world.map and world.map.id==MAP_ID then
-        text="EZRA: I'm right here.\nCome talk to me."
+        text="EZRA: I am right\nhere.\fCome talk to me."
       elseif caseResolutionPending() then
-        text="EZRA: Get back here.\nWe'll go over it."
+        text="EZRA: Your report\nis still waiting.\fMeet me at the\nSOUL HOUSE.\fIt is in LAVENDER."
       elseif mod.save:get("warden_case_official")==true then
-        text="EZRA: Stay sharp.\nFinish the case."
+        text="EZRA: Your case is\nstill active.\fFinish the job or\ncome to LAVENDER."
       elseif pendingCase() then
-        text="EZRA: A case came in.\nCome see me."
+        text="EZRA: A case is\nopen tonight.\fMeet me at the\nSOUL HOUSE.\fIt is in LAVENDER."
+      elseif world and mod._wardenIsNight(world) then
+        -- Calling Ezra after dark is the player's deterministic alternative
+        -- to waiting for the once-per-night random incoming-call roll. Asking
+        -- consumes that roll for tonight, so declining cannot be followed by
+        -- an unsolicited call a few steps later.
+        mod.save:set("warden_night_roll_done",true)
+        world:showText("EZRA: Up for some\nspirit warding?",function()
+          world:askYesNo(function(yes)
+            if yes then
+              setPendingCase(true)
+              mod.save:set("warden_case_called",true)
+              world:showText("EZRA: Good.\nI have a case.\fMeet me at the\nSOUL HOUSE.\fIt is in LAVENDER.")
+            else
+              world:showText("EZRA: All right.\nAnother night.")
+            end
+          end)
+        end,true)
+        return
       else
-        text="EZRA: Nothing open\nright now. Stay sharp."
+        text="EZRA: No case is\nopen right now.\fI will call you\nafter dark.\fMeet me at the\nSOUL HOUSE.\fIt is in LAVENDER."
       end
-      self.call={contact=id,kind="warden_ezra",name="EZRA",text=text}
+      -- The phone card's own bottom panel is only a three-row connection
+      -- display; it does not interpret paragraph breaks.  Keep the vanilla
+      -- caller/ellipsis there and push Ezra's conversation through the
+      -- overworld TextBox, whose A-button paging handles every two-line page.
+      if world and world.showText then world:showText(text) end
     end
   end
 
   local function ringEzraCaseCall(world)
     if not (world and world.showText) then return false end
+    -- Use Crystal's complete incoming-call sequence when the VM is available:
+    -- WaitSFX, ring, pause, WaitSFX, ring, caller-ID box, message and hang-up.
+    -- This prevents the quiet SFX_CALL from being swallowed by another sound.
+    if world.vm and world.vm.start then
+      local body={
+        {op="rawtext",text="A case just came\nin for tonight.\fMeet me at the\nSOUL HOUSE.\fIt's in LAVENDER.\fI will brief you\nwhen you get here."},
+        {op="end"},
+      }
+      local call={contact=EZRA_PHONE_ID,scriptKey=body}
+      world.vm.curPhoneCaller=EZRA_PHONE_ID
+      local rows=require("src.core.gen2.PhoneRing").script(call,"EZRA",nil)
+      if world.vm:start(rows) then
+        mod.save:set("warden_case_called",true)
+        return true
+      end
+    end
+    -- Headless/older-engine fallback. Normal 0.2.59 gameplay uses the VM path.
     mod.save:set("warden_case_called",true)
-    -- Two real phone-ring cues before the message. The text follows Crystal's
-    -- caller rhythm but stays inside the mod's strict two-line paging rule.
-    playNamed(world,"Sfx_Call",106)
     playNamed(world,"Sfx_Call",106)
     showPaged(world,{
       "RING! RING!\nEZRA:",
       "A case just came\nin for tonight.",
-      "Come see me in\nLAVENDER.",
+      "Meet me at the\nSOUL HOUSE.",
+      "It's in LAVENDER.",
       "I will brief you\nwhen you get here."
     })
     return true
@@ -3685,21 +3799,11 @@ return function(mod)
       return vanillaStartScriptedBattle(world, record, wild, onDone, ...)
     end
 
-    local vanillaStartBattle = Gen2World.startBattle
-    Gen2World.startBattle = function(world, opts, onDone, ...)
-      if world and world.map and isHauntedMapId(world.map.id)
-        and mod.save:get("warden_enrolled") == true
-        and mod.save:get("haunt_resolved") ~= true
-        and type(opts) == "table" and opts.trainer then
-        world.talkNpc = nil
-        world.trainerSight = nil
-        world.trainerNpc = nil
-        if world.vm then world.vm.trainerObject = nil end
-        if onDone then pcall(onDone, "win") end
-        return false
-      end
-      return vanillaStartBattle(world, opts, onDone, ...)
-    end
+    -- Do not wrap World:startBattle here. Trainer encounters already pass
+    -- through startTrainerScript/startScriptedBattle above, which is enough
+    -- to suppress retail fights during an active investigation. Leaving the
+    -- final battle handoff untouched avoids competing with UI/battle mods
+    -- (notably Project Highlander) that legitimately wrap the same engine seam.
   end
 
   -- DEV7i: the Executive ambush is a retail Radio Tower coordinate/scene

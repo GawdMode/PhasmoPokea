@@ -160,3 +160,8 @@ Correct identification is optional for completing a cleansing, but it awards an 
 5. Visit Lavender Town’s Soul House to begin.
 
 Bug reports and gameplay feedback are welcome, especially regarding investigation balance, clue clarity, equipment behavior, and spirit activity.
+
+
+## v1.1.2 update
+
+Improves compatibility with Project Highlander by removing PhasmoPokéa’s redundant `World:startBattle` wrapper while preserving haunted-investigation trainer suppression. Retains the v1.1.1 world-availability stability fix.
